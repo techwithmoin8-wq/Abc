@@ -1,4 +1,5 @@
-name: Build Android APK (Sara Industries)
+
+name: Rescue Build • Android APK (Sara Industries)
 
 on:
   push: { branches: [ "main" ] }
@@ -13,6 +14,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # JDK aligned with current Android Gradle Plugin
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -20,13 +22,14 @@ jobs:
           java-version: "17"
           cache: gradle
 
+      # Stable Flutter toolchain
       - name: Set up Flutter (stable)
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Create android/ios if missing
+      # If android/ or ios/ folders are missing, create them
       - name: Ensure android/ and ios/ exist
         run: |
           if [ ! -d "android" ] || [ ! -d "ios" ]; then
@@ -35,30 +38,41 @@ jobs:
             [ ! -d "ios" ] && cp -r _tmpapp/ios . || true
           fi
 
-      # Pre-fix the usual build errors
-      - name: Patch Android config (AndroidX, SDK levels, exported, namespace, memory)
+      # Auto-patch common causes of red errors
+      - name: Patch Android config (AndroidX, SDK, namespace, exported, memory)
+        shell: bash
         run: |
-          # AndroidX + memory
+          set -e
+
+          # gradle.properties: AndroidX + memory
           mkdir -p android
-          cat >> android/gradle.properties <<'EOF'
+          touch android/gradle.properties
+          awk '1' android/gradle.properties > /tmp/gp || true
+          cat > android/gradle.properties <<'EOF'
           android.useAndroidX=true
           android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx2048m -Dkotlin.daemon.jvm.options=-Xmx1024m
+          org.gradle.jvmargs=-Xmx3072m -Dkotlin.daemon.jvm.options=-Xmx1024m
           kotlin.code.style=official
           EOF
+          cat /tmp/gp >> android/gradle.properties || true
 
-          # SDK levels
-          sed -i 's/minSdkVersion [0-9][0-9]*/minSdkVersion 21/g' android/app/build.gradle || true
-          sed -i 's/targetSdkVersion [0-9][0-9]*/targetSdkVersion 34/g' android/app/build.gradle || true
-          sed -i 's/compileSdkVersion [0-9][0-9]*/compileSdkVersion 34/g' android/app/build.gradle || true
+          APP_GRADLE="android/app/build.gradle"
+          [ -f "$APP_GRADLE" ] || APP_GRADLE="android/app/build.gradle.kts"
 
-          # Ensure namespace exists for AGP 8+
-          if ! grep -q '^[[:space:]]*namespace[[:space:]]' android/app/build.gradle; then
+          # SDK levels (min 21, compile/target 34)
+          if [ -f "$APP_GRADLE" ]; then
+            sed -i 's/minSdkVersion \([0-9]\+\)/minSdkVersion 21/g' "$APP_GRADLE" || true
+            sed -i 's/compileSdkVersion \([0-9]\+\)/compileSdkVersion 34/g' "$APP_GRADLE" || true
+            sed -i 's/targetSdkVersion \([0-9]\+\)/targetSdkVersion 34/g' "$APP_GRADLE" || true
+          fi
+
+          # Add namespace for AGP 8+ if missing
+          if [ -f "android/app/build.gradle" ] && ! grep -q '^[[:space:]]*namespace[[:space:]]' android/app/build.gradle; then
             sed -i '0,/android {/s//android {\n    namespace "com.sara.gstapp"/' android/app/build.gradle || true
           fi
 
-          # Ensure android:exported="true" on main activity for Android 12+
-          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # Android 12+: ensure exported="true" on MainActivity
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
             if grep -q 'android:name="\.MainActivity"' "$MANIFEST" && ! grep -q 'android:exported=' "$MANIFEST"; then
               sed -i 's|<activity android:name="\.MainActivity"|<activity android:name=".MainActivity" android:exported="true"|' "$MANIFEST"
@@ -68,10 +82,17 @@ jobs:
             fi
           fi
 
+          # If the Gradle wrapper is too old, bump it (safe default)
+          if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            if ! grep -q "distributionUrl=.*/gradle-8" android/gradle/wrapper/gradle-wrapper.properties; then
+              sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-all.zip#' android/gradle/wrapper/gradle-wrapper.properties || true
+            fi
+          fi
+
       - name: Flutter pub get
         run: flutter pub get
 
-      - name: Flutter doctor
+      - name: Flutter doctor (diagnostics)
         run: flutter doctor -v
 
       - name: Build release APK
